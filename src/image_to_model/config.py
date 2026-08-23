@@ -65,7 +65,19 @@ class ReconstructionConfig:
     """Generate and stitch a back surface to make the mesh watertight."""
 
     depth_smoothing: float = 1.2
-    """Gaussian sigma (in pixels) applied to depth before meshing."""
+    """Filter radius (in pixels) applied to depth before meshing."""
+
+    depth_filter: str = "bilateral"
+    """``bilateral`` smooths depth while keeping the edges the photo shows,
+    ``gaussian`` blurs everything equally, ``none`` skips filtering."""
+
+    depth_filter_range: float = 0.08
+    """How different the guide image must look before the bilateral filter
+    stops smoothing across it. Lower keeps more edges, at the cost of noise."""
+
+    rim_profile: str = "fillet"
+    """Silhouette cross-section: ``fillet`` rounds the edge like a real object,
+    ``smoothstep`` leaves it flatter with a harder corner, ``linear`` chamfers."""
 
     # -- mesh refinement --------------------------------------------------
     smooth_iterations: int = 12
@@ -133,6 +145,12 @@ class ReconstructionConfig:
             raise ValueError("thickness must be non-negative")
         if self.depth_smoothing < 0.0:
             raise ValueError("depth_smoothing must be non-negative")
+        if self.depth_filter not in {"bilateral", "gaussian", "none"}:
+            raise ValueError("depth_filter must be 'bilateral', 'gaussian' or 'none'")
+        if self.depth_filter_range <= 0.0:
+            raise ValueError("depth_filter_range must be positive")
+        if self.rim_profile not in {"fillet", "smoothstep", "linear"}:
+            raise ValueError("rim_profile must be 'fillet', 'smoothstep' or 'linear'")
         if self.smooth_iterations < 0:
             raise ValueError("smooth_iterations must be non-negative")
         if not 0.0 <= self.min_component_ratio < 1.0:
@@ -227,6 +245,16 @@ PRESETS: dict[str, dict[str, Any]] = {
         "target": "roblox",
         "working_resolution": 512,
         "smooth_iterations": 14,
+    },
+    "roblox-detail": {
+        # A single prop imported on its own may use the full 21,000-triangle
+        # allowance, rather than the conservative batch-safe budget.
+        "target": "roblox",
+        "target_faces": 21_000,
+        "working_resolution": 768,
+        "smooth_iterations": 16,
+        "depth_smoothing": 0.8,
+        "texture_size": 1024,
     },
     "roblox-accessory": {
         "target": "roblox-avatar",

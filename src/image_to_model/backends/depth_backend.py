@@ -30,7 +30,7 @@ from ..geometry.mesh_ops import (
     taubin_smooth,
 )
 from ..geometry.surface import BACK, build_surface, choose_stride
-from ..imaging import gaussian_blur
+from ..imaging import gaussian_blur, joint_bilateral_filter
 from ..logging import get_logger, stage
 from ..morphology import binary_erode
 from ..texture import build_atlas, compute_uvs, sample_vertex_colors
@@ -61,8 +61,18 @@ class DepthBackend(ReconstructionBackend):
             depth_map = depth_map.normalized()
 
         depth = depth_map.depth
-        if config.depth_smoothing > 0:
-            depth = gaussian_blur(depth, config.depth_smoothing)
+        if config.depth_smoothing > 0 and config.depth_filter != "none":
+            if config.depth_filter == "bilateral":
+                # Guided by the photograph's luminance, so smoothing stops at
+                # edges the image shows rather than rounding them away.
+                guide = (image.astype(np.float32) / 255.0) @ np.array(
+                    [0.2126, 0.7152, 0.0722], dtype=np.float32
+                )
+                depth = joint_bilateral_filter(
+                    depth, guide, config.depth_smoothing, config.depth_filter_range
+                )
+            else:
+                depth = gaussian_blur(depth, config.depth_smoothing)
 
         # Trimming the mask edge keeps the soft alpha fringe, which blends
         # subject and background colours, out of the geometry.
@@ -88,6 +98,7 @@ class DepthBackend(ReconstructionBackend):
                 fov_degrees=config.fov_degrees,
                 mask_threshold=0.5,
                 stride=stride,
+                rim_profile=config.rim_profile,
             )
 
         mesh = surface.mesh

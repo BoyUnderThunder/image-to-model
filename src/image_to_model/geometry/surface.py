@@ -22,7 +22,7 @@ from ..logging import get_logger
 from ..types import CameraIntrinsics, Mesh
 from .lift import camera_distance, project_to_world
 
-__all__ = ["SurfaceResult", "build_surface", "choose_stride", "FRONT", "BACK"]
+__all__ = ["SurfaceResult", "build_surface", "choose_stride", "RIM_PROFILES", "FRONT", "BACK"]
 
 log = get_logger("geometry.surface")
 
@@ -31,6 +31,12 @@ BACK = 1
 
 #: World-space width the subject is normalised to before scaling to target units.
 _WORLD_WIDTH = 1.0
+
+#: Default rim width, as a fraction of the subject's square-root area. Wider
+#: spreads the rounding over more triangles, which measurably lowers surface
+#: roughness; past roughly 0.12 the gain flattens out and the shape just
+#: gets softer, so this sits at the knee.
+_RIM_WIDTH_FRACTION = 0.12
 
 
 @dataclass
@@ -80,25 +86,49 @@ def _smoothstep(t: np.ndarray) -> np.ndarray:
     return t * t * (3.0 - 2.0 * t)
 
 
-def _rim_factor(inside: np.ndarray, rim_width: float) -> np.ndarray:
+def _fillet(t: np.ndarray) -> np.ndarray:
+    """Quarter-circle profile: 0 at t=0, 1 at t=1, vertical tangent at t=0.
+
+    This is the shape a rounded edge actually has. Where a smoothstep leaves
+    the silhouette flat and lets the side wall drop away at a right angle,
+    this leaves it tangent to the view direction, which is the defining
+    property of a silhouette on a smooth object.
+    """
+    t = np.clip(t, 0.0, 1.0)
+    return np.sqrt(np.clip(1.0 - (1.0 - t) ** 2, 0.0, 1.0))
+
+
+#: Named rim profiles. ``fillet`` rounds the silhouette; ``smoothstep`` keeps
+#: the flatter, harder-edged profile; ``linear`` gives a plain chamfer.
+RIM_PROFILES = {
+    "fillet": _fillet,
+    "smoothstep": _smoothstep,
+    "linear": lambda t: np.clip(t, 0.0, 1.0),
+}
+
+
+def _rim_factor(distance: np.ndarray, rim_width: float, profile: str = "fillet") -> np.ndarray:
     """Taper the relief towards the silhouette so the model closes smoothly.
 
-    Distance is measured on the sampled grid rather than the full-resolution
-    mask, so the taper stays the same shape no matter how coarse the grid is.
+    ``distance`` is distance-to-background in source pixels, sampled at the
+    grid points. Measuring it at full resolution rather than on the subsampled
+    grid matters for the ``fillet`` profile: a grid-quantised distance steps in
+    whole cells, and a profile with a vertical tangent turns that first step
+    into a large jump in height, which shows up as a sawtooth along the
+    silhouette. Fractional distances remove the aliasing at its source.
 
-    The taper deliberately stops just short of zero at the outermost ring. A
-    rim that reached exactly zero would put front and back vertices on top of
-    each other, and merging those turns any boundary edge with both endpoints
-    on the rim into a four-way non-manifold edge. Keeping a sliver of thickness
-    avoids that whole class of defect, and reads as a slightly softened edge
-    rather than an infinitely sharp one.
+    The taper stops just short of zero at the outermost ring. A rim reaching
+    exactly zero would put front and back vertices in the same place, and
+    merging those turns any boundary edge with both endpoints on the rim into a
+    four-way non-manifold edge.
     """
-    from ..depth.heuristic import distance_transform
-
     if rim_width <= 0:
-        return inside.astype(np.float32)
-    distance = distance_transform(inside)
-    return _smoothstep(distance / float(rim_width)).astype(np.float32)
+        return np.ones_like(distance, dtype=np.float32)
+    if profile not in RIM_PROFILES:
+        raise ValueError(
+            f"Unknown rim profile {profile!r}. Choose from: {', '.join(sorted(RIM_PROFILES))}"
+        )
+    return RIM_PROFILES[profile](distance / float(rim_width)).astype(np.float32)
 
 
 def _boundary_directed_edges(faces: np.ndarray, n_vertices: int) -> np.ndarray:
@@ -187,6 +217,7 @@ def build_surface(
     stride: int = 1,
     rim_width: float = 0.0,
     min_thickness: float = 0.012,
+    rim_profile: str = "fillet",
 ) -> SurfaceResult:
     """Build a surface mesh from a normalised depth map and subject mask.
 
@@ -236,11 +267,17 @@ def build_surface(
     else:
         relief_unit = np.clip((high - depth_grid) / (high - low), 0.0, 1.0)
 
+    full_binary = mask > mask_threshold
+    subject_pixels = max(1, int(full_binary.sum()))
+    from ..depth.heuristic import distance_transform
+
+    distance_grid = distance_transform(full_binary)[np.ix_(rows, cols)]
+
     if rim_width <= 0:
         # Scale the taper with the subject so it stays proportionally narrow.
-        extent = math.sqrt(max(1, int(inside.sum())))
-        rim_width = max(1.0, 0.06 * extent)
-    rim = _rim_factor(inside, rim_width)
+        rim_width = max(1.0, _RIM_WIDTH_FRACTION * math.sqrt(subject_pixels))
+    rim = _rim_factor(distance_grid, rim_width, rim_profile)
+    rim = np.where(inside, rim, 0.0).astype(np.float32)
 
     rows_grid, cols_grid = np.meshgrid(rows, cols, indexing="ij")
     relief_depth = float(relief_scale) * _WORLD_WIDTH

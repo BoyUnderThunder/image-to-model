@@ -21,6 +21,7 @@ __all__ = [
     "resize_longest",
     "resize_array",
     "gaussian_blur",
+    "joint_bilateral_filter",
     "bilinear_sample",
     "to_float",
     "to_uint8",
@@ -194,3 +195,55 @@ def bilinear_sample(image: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.nda
     top = arr[y0, x0] * (1.0 - wx) + arr[y0, x1] * wx
     bottom = arr[y1, x0] * (1.0 - wx) + arr[y1, x1] * wx
     return (top * (1.0 - wy) + bottom * wy).astype(np.float32)
+
+
+def joint_bilateral_filter(
+    values: np.ndarray,
+    guide: np.ndarray,
+    sigma_spatial: float,
+    sigma_range: float = 0.1,
+) -> np.ndarray:
+    """Smooth ``values`` while keeping the edges present in ``guide``.
+
+    A neighbour contributes in proportion to both how near it is and how
+    similar the *guide* looks there, so smoothing stops at boundaries the guide
+    shows. Filtering a depth map guided by the photograph therefore removes
+    per-pixel depth noise without rounding off the object's real edges, which
+    is exactly what a plain Gaussian cannot do: it blurs across a depth
+    discontinuity just as happily as along a flat surface.
+
+    ``guide`` is expected in roughly [0, 1]; ``sigma_range`` is measured in
+    those same units.
+    """
+    values = np.asarray(values, dtype=np.float32)
+    guide = np.asarray(guide, dtype=np.float32)
+    if sigma_spatial <= 0:
+        return values
+    if guide.shape != values.shape:
+        raise ValueError(f"guide shape {guide.shape} does not match values shape {values.shape}")
+
+    radius = max(1, int(round(2.0 * sigma_spatial)))
+    padded_values = np.pad(values, radius, mode="edge")
+    padded_guide = np.pad(guide, radius, mode="edge")
+    height, width = values.shape
+
+    accumulator = np.zeros_like(values)
+    weight_total = np.zeros_like(values)
+    range_denominator = 2.0 * max(sigma_range, 1e-6) ** 2
+    spatial_denominator = 2.0 * sigma_spatial**2
+
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            spatial = np.exp(-(dx * dx + dy * dy) / spatial_denominator)
+            if spatial < 1e-4:
+                continue
+            y0, x0 = dy + radius, dx + radius
+            shifted_values = padded_values[y0 : y0 + height, x0 : x0 + width]
+            shifted_guide = padded_guide[y0 : y0 + height, x0 : x0 + width]
+
+            difference = guide - shifted_guide
+            weight = spatial * np.exp(-(difference * difference) / range_denominator)
+            accumulator += weight * shifted_values
+            weight_total += weight
+
+    return (accumulator / np.maximum(weight_total, 1e-8)).astype(np.float32)

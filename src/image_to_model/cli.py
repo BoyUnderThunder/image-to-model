@@ -149,6 +149,21 @@ def _add_reconstruction_options(parser: argparse.ArgumentParser) -> None:
         "--fov-degrees", type=float, default=None, help="Assumed camera field of view."
     )
     shape.add_argument(
+        "--rim-profile",
+        default=None,
+        choices=["fillet", "smoothstep", "linear"],
+        help="Silhouette cross-section. fillet rounds the edge like a real object.",
+    )
+    shape.add_argument(
+        "--depth-filter",
+        default=None,
+        choices=["bilateral", "gaussian", "none"],
+        help="bilateral keeps edges the photo shows; gaussian blurs everything equally.",
+    )
+    shape.add_argument(
+        "--depth-smoothing", type=float, default=None, help="Depth filter radius in pixels."
+    )
+    shape.add_argument(
         "--no-texture",
         dest="texture",
         action="store_false",

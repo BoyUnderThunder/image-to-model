@@ -20,7 +20,7 @@ from image_to_model.geometry.mesh_ops import (
     taubin_smooth,
     weld_vertices,
 )
-from image_to_model.geometry.surface import build_surface, choose_stride
+from image_to_model.geometry.surface import RIM_PROFILES, build_surface, choose_stride
 from image_to_model.types import CameraIntrinsics, Mesh
 
 
@@ -267,3 +267,64 @@ class TestDecimate:
 
     def test_zero_budget_disables_decimation(self, dome):
         assert decimate(dome, 0).mesh is dome
+
+
+class TestRimProfile:
+    """The rim profile sets the silhouette's cross-section.
+
+    ``fillet`` is the default because a real object's surface turns tangent to
+    the view direction at its silhouette, which a smoothstep does not do.
+    """
+
+    @staticmethod
+    def _build(profile: str):
+        mask = _disc_mask()
+        return build_surface(_dome_depth(mask), mask, stride=1, rim_profile=profile)
+
+    @pytest.mark.parametrize("profile", sorted(RIM_PROFILES))
+    def test_every_profile_closes_the_surface(self, profile):
+        mesh = self._build(profile).mesh
+        assert mesh.is_watertight()
+        assert mesh.euler_characteristic() == 2
+
+    def test_unknown_profile_raises(self):
+        with pytest.raises(ValueError, match="Unknown rim profile"):
+            self._build("bevel")
+
+    def test_fillet_starts_vertical_and_ends_flat(self):
+        t = np.linspace(0.0, 1.0, 101)
+        values = RIM_PROFILES["fillet"](t)
+        assert values[0] == pytest.approx(0.0)
+        assert values[-1] == pytest.approx(1.0)
+        # A vertical tangent at the silhouette: the first step is far larger
+        # than the last, which is what rounds the edge instead of cornering it.
+        assert (values[1] - values[0]) > 10 * (values[-1] - values[-2])
+
+    def test_smoothstep_starts_flat(self):
+        t = np.linspace(0.0, 1.0, 101)
+        values = RIM_PROFILES["smoothstep"](t)
+        assert (values[1] - values[0]) < 0.01
+
+    def test_fillet_reaches_full_relief_sooner_than_smoothstep(self):
+        # The fillet lifts the surface away from the silhouette immediately,
+        # so the rounding is confined to a narrow band at the edge instead of
+        # flattening the whole outer region.
+        t = np.linspace(0.0, 1.0, 201)
+        fillet = RIM_PROFILES["fillet"](t)
+        smoothstep = RIM_PROFILES["smoothstep"](t)
+        assert np.all(fillet >= smoothstep - 1e-6)
+        assert t[np.argmax(fillet >= 0.9)] < t[np.argmax(smoothstep >= 0.9)]
+
+    def test_fillet_bulges_further_forward(self):
+        # Perspective narrows the cross-section as the surface comes towards
+        # the camera, so the fillet's fuller profile shows up as extra depth
+        # rather than extra volume.
+        fillet = self._build("fillet").mesh
+        smoothstep = self._build("smoothstep").mesh
+        assert fillet.extent()[2] >= smoothstep.extent()[2] - 1e-6
+
+    def test_all_profiles_are_bounded(self):
+        t = np.linspace(-0.5, 1.5, 51)
+        for name, fn in RIM_PROFILES.items():
+            values = np.asarray(fn(t))
+            assert values.min() >= 0.0 and values.max() <= 1.0, name

@@ -88,7 +88,7 @@ photo ─► segment ─► depth ─► mesh ─► refine ─► texture ─�
 6. **Export.** OBJ + MTL + PNG, GLB, PLY or STL, converting axes and units for
    the target.
 
-### Two details worth knowing
+### Details worth knowing
 
 **Geometry is low-poly, detail lives in the texture.** The mesh is built a few
 times over the budget and then decimated, rather than built at the budget. QEM
@@ -96,11 +96,69 @@ spends triangles on creases and silhouettes and thins out flat areas, so a
 10,000-triangle prop with a 1024² texture reads far better than a uniformly
 coarse mesh — which is exactly how Roblox assets are normally authored.
 
+**The silhouette is rounded, not cornered.** The relief tapers to the outline
+along a quarter-circle, so the surface arrives at the silhouette tangent to the
+view direction — which is what a silhouette on a smooth object actually is. The
+obvious alternative, a smoothstep, has zero slope there: it leaves the outline
+flat and lets the side wall drop away at a right angle, which reads as a hard
+pointed lens rather than a solid. `--rim-profile` exposes both.
+
+**Depth is filtered with an edge-preserving bilateral, not a blur.** Depth
+models are noisy per-pixel and that noise becomes surface roughness, but a plain
+Gaussian is indiscriminate: it smooths across depth discontinuities just as
+happily as along a flat face, rounding off the very edges that carry the shape.
+Filtering guided by the photograph's luminance stops smoothing where the image
+shows an edge. On a synthetic step edge it removes as much noise as the
+Gaussian while keeping the step intact.
+
 **The silhouette keeps a minimum thickness.** Tapering the front and back
 surfaces to meet at a knife edge puts vertices in the same place, and merging
 those makes any boundary edge with both ends on the rim four-way non-manifold.
 A sliver of thickness avoids that whole class of defect and gives an edge that
 physics and 3D printing can handle.
+
+## Getting better results
+
+Roughly in order of how much difference they make.
+
+**1. Install the learned extras.** This is the single biggest jump and it is one
+command. Without `torch` the pipeline falls back to inflating the silhouette,
+which invents plausible roundness rather than measuring real depth:
+
+```bash
+pip install -e '.[ai,matting]'
+```
+
+`ai` swaps in Depth Anything V2 for actual monocular depth; `matting` adds
+`rembg`, which handles backgrounds the classical border model cannot. Run
+`image-to-model info` to confirm both are active.
+
+**2. Feed it a better photo.** More than any flag:
+
+- subject centred, fully in frame, filling a good part of it;
+- plain, evenly lit background — or a PNG that already has an alpha channel;
+- diffuse light, no hard shadows crossing the silhouette;
+- shoot slightly off-axis rather than dead-on, so there is depth variation to find.
+
+**3. Spend the triangles you are allowed.** The default budget of 10,000 is the
+batch-import-safe number. A prop imported on its own may use the full 21,000:
+
+```bash
+image-to-model photo.jpg -o out/ --preset roblox-detail
+```
+
+That also raises the working resolution to 768, which sharpens both the
+silhouette and the baked texture.
+
+**4. Tune the shape.** `--relief-scale` controls how far the front bulges
+(raise it for rounded objects, lower it for flat ones); `--thickness` sets how
+deep the back goes, down to `0` for a flat-backed relief. If the subject is not
+being found, `--debug-dir out/debug` writes the mask and depth map so you can
+see what the pipeline actually saw.
+
+**5. For genuine 360° geometry, change the backend.** No amount of tuning gets
+past the ceiling below — a feed-forward image-to-3D model is the real answer.
+See [Custom backends](#custom-backends).
 
 ## What this can and cannot do
 
@@ -157,7 +215,7 @@ mesh.stats()
 | `generic` | 200,000 | — | 4096 | metres | Y |
 
 Presets: `fast`, `balanced`, `detailed`, `relief`, `roblox-prop`,
-`roblox-accessory`.
+`roblox-detail` (full 21k budget), `roblox-accessory`.
 
 ## Useful options
 
@@ -170,6 +228,8 @@ Presets: `fast`, `balanced`, `detailed`, `relief`, `roblox-prop`,
 --working-resolution N  image size used for depth and texture (default 512)
 --depth-model NAME      auto | heuristic | depth-anything | dpt | any HF model id
 --segmentation NAME     auto | alpha | rembg | border | none
+--rim-profile NAME      fillet (rounded, default) | smoothstep | linear
+--depth-filter NAME     bilateral (edge-preserving, default) | gaussian | none
 --preview / --viewer    turntable PNG / self-contained WebGL page
 --debug-dir DIR         dump the mask, depth map and baked texture
 ```

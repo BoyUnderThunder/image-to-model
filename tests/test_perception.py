@@ -9,6 +9,7 @@ from image_to_model.depth import available_models, create_estimator, estimate_de
 from image_to_model.depth.heuristic import HeuristicDepthEstimator, distance_transform
 from image_to_model.depth.learned import LearnedDepthEstimator, resolve_model
 from image_to_model.errors import ImageToModelError, SegmentationError
+from image_to_model.imaging import gaussian_blur, joint_bilateral_filter
 from image_to_model.morphology import (
     binary_close,
     binary_dilate,
@@ -217,3 +218,42 @@ class TestTexture:
             rgb, coords, is_back=np.array([False, True]), backface_darkening=0.5
         )
         assert colors[1].max() < colors[0].max()
+
+
+class TestEdgePreservingFilter:
+    """The bilateral filter exists to beat a Gaussian on exactly one axis:
+    removing noise without eating the edges the photo shows."""
+
+    @staticmethod
+    def _step_scene(seed: int = 0):
+        guide = np.zeros((48, 48), dtype=np.float32)
+        guide[:, 24:] = 1.0
+        noisy = guide + np.random.default_rng(seed).normal(0, 0.05, guide.shape).astype(np.float32)
+        return guide, noisy
+
+    @staticmethod
+    def _step_height(array):
+        return abs(float(array[24, 27] - array[24, 20]))
+
+    def test_removes_noise_as_well_as_a_gaussian(self):
+        guide, noisy = self._step_scene()
+        bilateral = joint_bilateral_filter(noisy, guide, 2.0, 0.1)
+        gaussian = gaussian_blur(noisy, 2.0)
+        flat = np.s_[:, :18]
+        assert bilateral[flat].std() < noisy[flat].std()
+        assert bilateral[flat].std() == pytest.approx(gaussian[flat].std(), abs=0.01)
+
+    def test_preserves_an_edge_the_gaussian_destroys(self):
+        guide, noisy = self._step_scene()
+        bilateral = joint_bilateral_filter(noisy, guide, 2.0, 0.1)
+        gaussian = gaussian_blur(noisy, 2.0)
+        assert self._step_height(bilateral) > self._step_height(gaussian)
+        assert self._step_height(bilateral) == pytest.approx(1.0, abs=0.1)
+
+    def test_zero_sigma_is_a_no_op(self):
+        guide, noisy = self._step_scene()
+        assert np.array_equal(joint_bilateral_filter(noisy, guide, 0.0), noisy)
+
+    def test_mismatched_guide_is_rejected(self):
+        with pytest.raises(ValueError, match="does not match"):
+            joint_bilateral_filter(np.zeros((8, 8)), np.zeros((4, 4)), 1.0)
