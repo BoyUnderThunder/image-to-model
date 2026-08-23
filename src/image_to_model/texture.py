@@ -25,7 +25,14 @@ import numpy as np
 from .imaging import bilinear_sample, resize_array
 from .types import CameraIntrinsics
 
-__all__ = ["AtlasLayout", "build_atlas", "compute_uvs", "sample_vertex_colors", "inpaint_background"]
+__all__ = [
+    "AtlasLayout",
+    "build_atlas",
+    "compute_uvs",
+    "sample_vertex_colors",
+    "inpaint_background",
+    "split_atlas_seam",
+]
 
 
 def inpaint_background(rgb: np.ndarray, mask: np.ndarray, iterations: int = 12) -> np.ndarray:
@@ -131,13 +138,95 @@ def build_atlas(
     tile_width = int(texture_size)
     tile_height = max(1, int(texture_size) // 2)
     front_tile = resize_array(crop, (tile_width, tile_height))
+
+    # Darken the back, but ramp the darkening in from the silhouette rather
+    # than applying it flat. Front and back meet at the outline, so a flat
+    # multiplier puts a hard brightness step exactly along the join and draws a
+    # dark line around the model. Matching the front at the edge and falling
+    # away inwards makes the transition invisible.
+    from .depth.heuristic import distance_transform
+
+    inside = mask > 0.5
+    falloff = distance_transform(inside)
+    peak = float(falloff.max())
+    if peak > 1e-6:
+        ramp = np.clip(falloff / peak, 0.0, 1.0)
+        ramp = ramp * ramp * (3.0 - 2.0 * ramp)  # smoothstep
+    else:
+        ramp = np.ones_like(falloff)
+    shade = 1.0 - (1.0 - float(backface_darkening)) * ramp
+    shade_crop = shade[int(y0) : int(np.ceil(y1)), int(x0) : int(np.ceil(x1))]
+    if shade_crop.size == 0:
+        shade_crop = shade
+    shade_tile = resize_array(shade_crop.astype(np.float32), (tile_width, tile_height), mode="area")
+
     back_tile = np.clip(
-        front_tile.astype(np.float32) * float(backface_darkening), 0, 255
+        front_tile.astype(np.float32) * shade_tile[..., None], 0, 255
     ).astype(np.uint8)
 
     atlas = np.concatenate([front_tile, back_tile], axis=0)
     layout = AtlasLayout(x0=x0, y0=y0, width=crop_width, height=crop_height)
     return atlas, layout
+
+
+def split_atlas_seam(mesh, face_is_back: np.ndarray):
+    """Duplicate vertices shared between the front and back tiles.
+
+    UVs are per-vertex, so a triangle with one vertex in the front tile and
+    another in the back has its V coordinate interpolated across the gap
+    between them -- straight through whatever sits between the two tiles. The
+    result is a smeared band right where the surface turns away from the
+    camera, which is exactly the most visible place for it.
+
+    Giving each side its own copy of the shared vertices means every triangle
+    lies wholly within one tile and nothing interpolates across the join. The
+    geometry is untouched; only the vertex list grows.
+
+    Returns the mesh and a per-vertex boolean saying which tile each vertex
+    belongs to.
+    """
+    from .types import Mesh
+
+    faces = np.asarray(mesh.faces)
+    face_is_back = np.asarray(face_is_back, dtype=bool)
+    count = mesh.n_vertices
+
+    used_front = np.zeros(count, dtype=bool)
+    used_back = np.zeros(count, dtype=bool)
+    if (~face_is_back).any():
+        used_front[faces[~face_is_back].reshape(-1)] = True
+    if face_is_back.any():
+        used_back[faces[face_is_back].reshape(-1)] = True
+
+    shared = used_front & used_back
+    if not shared.any():
+        return mesh, used_back
+
+    shared_ids = np.flatnonzero(shared)
+    remap = np.zeros(count, dtype=np.int64)
+    remap[shared_ids] = np.arange(count, count + len(shared_ids), dtype=np.int64)
+
+    new_faces = faces.copy()
+    back_rows = np.flatnonzero(face_is_back)
+    block = new_faces[back_rows]
+    needs_copy = shared[block]
+    block[needs_copy] = remap[block[needs_copy]]
+    new_faces[back_rows] = block
+
+    out = Mesh(
+        vertices=np.concatenate([mesh.vertices, mesh.vertices[shared_ids]], axis=0),
+        faces=new_faces,
+    )
+    if mesh.vertex_normals is not None:
+        out.vertex_normals = np.concatenate(
+            [mesh.vertex_normals, mesh.vertex_normals[shared_ids]], axis=0
+        )
+
+    # A shared vertex now serves the front only; its copy serves the back.
+    vertex_is_back = np.concatenate(
+        [np.where(shared, False, used_back), np.ones(len(shared_ids), dtype=bool)]
+    )
+    return out, vertex_is_back
 
 
 def compute_uvs(

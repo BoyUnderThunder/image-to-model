@@ -53,6 +53,17 @@ class ReconstructionConfig:
     fov_degrees: float = 55.0
     """Assumed horizontal field of view used to lift pixels into camera space."""
 
+    mesher: str = "volume"
+    """``volume`` samples the solid into a scalar field and extracts one
+    isosurface, which wraps the silhouette with no seam. ``sheets`` builds a
+    front and back height field and sews them together -- faster, but it leaves
+    a seam around the outline and needs a minimum edge thickness to stay
+    manifold."""
+
+    volume_resolution: int = 0
+    """Cells across the subject's longest side for the volume mesher. 0 derives
+    one from the triangle budget."""
+
     relief_mode: str = "inradius"
     """How deep the model gets. ``inradius`` scales the relief to the subject's
     own silhouette, so a round outline inflates to something round and a thin
@@ -163,6 +174,10 @@ class ReconstructionConfig:
             raise ValueError("relief_scale must be positive")
         if not 0.0 < self.min_thickness < 1.0:
             raise ValueError("min_thickness must be within (0, 1)")
+        if self.mesher not in {"volume", "sheets"}:
+            raise ValueError("mesher must be 'volume' or 'sheets'")
+        if self.volume_resolution < 0:
+            raise ValueError("volume_resolution must be non-negative")
         if self.relief_mode not in {"inradius", "fraction"}:
             raise ValueError("relief_mode must be 'inradius' or 'fraction'")
         if self.projection not in {"orthographic", "perspective"}:
@@ -204,6 +219,14 @@ class ReconstructionConfig:
         if self.target_faces > 0:
             return self.target_faces
         return self.profile.triangle_budget
+
+    def resolve_volume_resolution(self) -> int:
+        """Grid resolution for the volume mesher."""
+        from .geometry.volume import choose_resolution
+
+        if self.volume_resolution > 0:
+            return self.volume_resolution
+        return choose_resolution(self.resolve_target_faces())
 
     def resolve_texture_size(self) -> int:
         if self.texture_size > 0:

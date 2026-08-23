@@ -76,10 +76,9 @@ photo ─► segment ─► depth ─► mesh ─► refine ─► texture ─�
    inflation*: push each pixel out in proportion to its distance from the
    outline, which turns a flat shape into a rounded solid. For logos, sprites and
    decals that's often the better choice anyway.
-3. **Mesh.** Lift the depth map into space, build a front surface, mirror it
-   into a back surface, and stitch the two boundary loops into a closed solid.
-   Depth is scaled to the subject's own silhouette, so a round outline comes
-   back round and a thin one stays thin.
+3. **Mesh.** Sample the solid into a scalar field and extract one continuous
+   isosurface. Depth is scaled to the subject's own silhouette, so a round
+   outline comes back round and a thin one stays thin.
 4. **Refine.** Taubin-smooth (which removes stair-stepping without the steady
    shrinking a plain Laplacian causes), drop noise islands, then simplify with
    quadric error metric edge collapse down to the polygon budget.
@@ -96,6 +95,28 @@ times over the budget and then decimated, rather than built at the budget. QEM
 spends triangles on creases and silhouettes and thins out flat areas, so a
 10,000-triangle prop with a 1024² texture reads far better than a uniformly
 coarse mesh — which is exactly how Roblox assets are normally authored.
+
+**The solid is extracted from a volume, not stitched from two sheets.** The
+obvious construction — a front height field, a back one, and a seam sewing their
+boundaries together — carries three problems: a visible join right around the
+silhouette, a minimum wall thickness needed to stop front and back vertices
+coinciding (which would make that join non-manifold), and a hard front/back
+split of every vertex that shows up as a ragged line in the texture. Sampling
+
+    f(x, y, z) = H(x, y) - |z - M(x, y)|
+
+on a grid and extracting where it crosses zero has none of them: the surface
+wraps around the silhouette because that is simply where the field changes sign.
+`--mesher sheets` keeps the old construction, which is faster.
+
+**Extraction handles cells the surface crosses twice.** Plain Surface Nets puts
+one vertex in each crossed cell, so a cell the surface passes through twice gets
+a single vertex standing in for two sheets and every edge into it carries four
+faces. That is not exotic — 88 of the 256 corner patterns have their inside
+corners split into more than one group — so each cell emits one vertex *per
+group* and each quad takes the one its own corner belongs to. Checked against a
+sphere (Euler 2, volume within 0.5%), a torus (Euler 0, so the handle is real)
+and two separate blobs in one grid.
 
 **Depth follows the silhouette, not the bounding box.** How deep the model gets
 is set by the subject's *inradius* — the radius of the largest disc that fits
@@ -135,11 +156,14 @@ Filtering guided by the photograph's luminance stops smoothing where the image
 shows an edge. On a synthetic step edge it removes as much noise as the
 Gaussian while keeping the step intact.
 
-**The silhouette keeps a minimum thickness.** Tapering the front and back
-surfaces to meet at a knife edge puts vertices in the same place, and merging
-those makes any boundary edge with both ends on the rim four-way non-manifold.
-A sliver of thickness avoids that whole class of defect and gives an edge that
-physics and 3D printing can handle.
+**UV seams split vertices, so "watertight" is judged after welding.** Giving the
+front and back tiles their own texture coordinates means duplicating the
+vertices along the join, or else triangles spanning both tiles interpolate their
+V coordinate through the gap between them and smear a band across the silhouette.
+That duplication breaks index-level watertightness while leaving the solid
+geometrically closed, so closure is checked once coincident vertices are merged.
+Every textured asset has seams; this is the check that matches what "is it a
+solid" actually means.
 
 ## Getting better results
 
@@ -246,6 +270,8 @@ Presets: `fast`, `balanced`, `detailed`, `relief`, `roblox-prop`,
 ```
 --target-faces N        triangle budget (0 = target default, negative = no decimation)
 --size-units N          longest axis, in the target's units
+--mesher NAME           volume (seamless, default) | sheets (faster)
+--volume-resolution N   grid cells across the subject; 0 derives from the budget
 --relief-mode NAME      inradius (follows the outline, default) | fraction
 --relief-scale N        relief multiplier; 1.0 is the correct inflation
 --thickness N           back depth relative to the front; 0 gives a flat back

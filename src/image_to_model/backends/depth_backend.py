@@ -30,10 +30,11 @@ from ..geometry.mesh_ops import (
     taubin_smooth,
 )
 from ..geometry.surface import BACK, build_surface, choose_stride
+from ..geometry.volume import build_volume_solid
 from ..imaging import gaussian_blur, joint_bilateral_filter
 from ..logging import get_logger, stage
 from ..morphology import binary_erode
-from ..texture import build_atlas, compute_uvs, sample_vertex_colors
+from ..texture import build_atlas, compute_uvs, sample_vertex_colors, split_atlas_seam
 from ..types import Subject
 from .base import BackendOutput, ReconstructionBackend
 
@@ -88,30 +89,54 @@ class DepthBackend(ReconstructionBackend):
         target_faces = config.resolve_target_faces()
         stride = choose_stride(binary, target_faces)
 
-        with stage("Building surface", log):
-            surface = build_surface(
-                depth,
-                work_mask,
-                relief_scale=config.relief_scale,
-                relief_mode=config.relief_mode,
-                thickness=config.thickness,
-                close_back=config.close_back,
-                fov_degrees=config.fov_degrees,
-                mask_threshold=0.5,
-                stride=stride,
-                rim_profile=config.rim_profile,
-                min_thickness=config.min_thickness,
-                orthographic=config.projection == "orthographic",
-            )
+        use_volume = config.mesher == "volume" and config.close_back
+        if config.mesher == "volume" and not config.close_back:
+            log.info("--open-back needs the sheet mesher; using it for this run")
 
-        mesh = surface.mesh
-        side = surface.side
+        side = None
+        if use_volume:
+            resolution = config.resolve_volume_resolution()
+            with stage(f"Voxelising at {resolution}^3 and extracting", log):
+                solid = build_volume_solid(
+                    depth,
+                    work_mask,
+                    relief_scale=config.relief_scale,
+                    relief_mode=config.relief_mode,
+                    thickness=config.thickness,
+                    fov_degrees=config.fov_degrees,
+                    mask_threshold=0.5,
+                    resolution=resolution,
+                    rim_profile=config.rim_profile,
+                )
+            surface = solid
+            mesh = solid.mesh
+            orthographic = True  # the volume grid is built in orthographic space
+        else:
+            with stage("Building surface", log):
+                surface = build_surface(
+                    depth,
+                    work_mask,
+                    relief_scale=config.relief_scale,
+                    relief_mode=config.relief_mode,
+                    thickness=config.thickness,
+                    close_back=config.close_back,
+                    fov_degrees=config.fov_degrees,
+                    mask_threshold=0.5,
+                    stride=stride,
+                    rim_profile=config.rim_profile,
+                    min_thickness=config.min_thickness,
+                    orthographic=config.projection == "orthographic",
+                )
+            mesh = surface.mesh
+            side = surface.side
+            orthographic = surface.orthographic
 
         mesh = remove_duplicate_faces(remove_degenerate_faces(mesh))
         if config.min_component_ratio > 0:
             mesh = keep_largest_components(mesh, config.min_component_ratio)
         mesh, kept = compact_vertices(mesh)
-        side = side[kept]
+        if side is not None:
+            side = side[kept]
 
         if config.smooth_iterations > 0:
             with stage("Smoothing", log):
@@ -126,14 +151,30 @@ class DepthBackend(ReconstructionBackend):
             with stage(f"Decimating to {target_faces:,} faces", log):
                 result = decimate(mesh, target_faces)
                 mesh = result.mesh
-                side = side[result.vertex_map]
+                if side is not None:
+                    side = side[result.vertex_map]
 
-        is_back = side == BACK
+        if side is not None:
+            is_back = side == BACK
+            face_is_back = is_back[mesh.faces].sum(axis=1) >= 2
+        else:
+            # The volume mesher produces one continuous surface with no notion
+            # of a front or back vertex, so read it off the geometry: a vertex
+            # whose normal points away from the camera is on the far side. The
+            # split then lands exactly where the surface turns away, instead of
+            # following a ragged line of triangle edges.
+            face_is_back = mesh.face_normals()[:, 2] < 0.0
+            is_back = np.zeros(mesh.n_vertices, dtype=bool)
+
+        # Split the front/back boundary before assigning UVs, so no triangle
+        # straddles the two atlas tiles.
+        mesh, is_back = split_atlas_seam(mesh, face_is_back)
+
         texture = None
 
         # Still in camera space here, so back-projection is exact.
         pixel_coords = world_to_pixel(
-            mesh.vertices, surface.intrinsics, surface.distance, surface.orthographic
+            mesh.vertices, surface.intrinsics, surface.distance, orthographic
         )
 
         if config.should_bake_texture():
@@ -150,7 +191,7 @@ class DepthBackend(ReconstructionBackend):
                     surface.intrinsics,
                     surface.distance,
                     layout,
-                    orthographic=surface.orthographic,
+                    orthographic=orthographic,
                 )
 
         if config.texture:
@@ -164,6 +205,7 @@ class DepthBackend(ReconstructionBackend):
             depth=depth_map,
             metadata={
                 "backend": self.name,
+                "mesher": "volume" if use_volume else "sheets",
                 "depth_source": depth_map.source,
                 "grid_stride": stride,
                 "target_faces": target_faces,

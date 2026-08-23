@@ -144,7 +144,9 @@ class TargetProfile:
                     "Some UV coordinates fall outside [0, 1]; they will wrap on import.",
                 )
 
-        if not mesh.is_watertight():
+        # Judged after merging coincident vertices, so UV seams -- which split
+        # vertices by design -- are not mistaken for holes.
+        if not mesh.is_closed_surface():
             report.add(
                 "warning",
                 "not_watertight",

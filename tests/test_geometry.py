@@ -7,6 +7,7 @@ import pytest
 
 from image_to_model.errors import ReconstructionError
 from image_to_model.geometry.decimate import decimate
+from image_to_model.geometry.isosurface import surface_nets
 from image_to_model.geometry.lift import camera_distance, project_to_world, world_to_pixel
 from image_to_model.geometry.mesh_ops import (
     boundary_vertices,
@@ -21,6 +22,7 @@ from image_to_model.geometry.mesh_ops import (
     weld_vertices,
 )
 from image_to_model.geometry.surface import RIM_PROFILES, build_surface, choose_stride
+from image_to_model.geometry.volume import build_volume_solid, choose_resolution
 from image_to_model.types import CameraIntrinsics, Mesh
 
 
@@ -475,3 +477,110 @@ class TestSphericalInflation:
             HeuristicDepthEstimator(profile="blobby").estimate(
                 np.zeros((32, 32, 3), dtype=np.uint8), mask
             )
+
+
+class TestIsosurface:
+    """The extractor is checked against shapes with known answers, because a
+    wrong isosurface still looks like a plausible mesh."""
+
+    @staticmethod
+    def _grid(function, n=48, span=1.0):
+        axis = np.linspace(-span, span, n)
+        x, y, z = np.meshgrid(axis, axis, axis, indexing="ij")
+        spacing = float(axis[1] - axis[0])
+        return function(x, y, z), (spacing,) * 3, (-span,) * 3
+
+    def test_sphere_is_closed_and_genus_zero(self):
+        field, spacing, origin = self._grid(lambda x, y, z: 0.7**2 - (x**2 + y**2 + z**2))
+        mesh = surface_nets(field, spacing=spacing, origin=origin)
+        assert mesh.is_watertight()
+        assert mesh.euler_characteristic() == 2
+
+    def test_sphere_volume_and_radius_are_accurate(self):
+        radius = 0.7
+        field, spacing, origin = self._grid(lambda x, y, z: radius**2 - (x**2 + y**2 + z**2))
+        mesh = surface_nets(field, spacing=spacing, origin=origin)
+        assert mesh.volume() == pytest.approx(4 / 3 * np.pi * radius**3, rel=0.02)
+        distances = np.linalg.norm(mesh.vertices, axis=1)
+        assert distances.min() == pytest.approx(radius, abs=0.02)
+        assert distances.max() == pytest.approx(radius, abs=0.02)
+
+    def test_winding_is_outward(self):
+        field, spacing, origin = self._grid(lambda x, y, z: 0.6**2 - (x**2 + y**2 + z**2))
+        assert surface_nets(field, spacing=spacing, origin=origin).volume() > 0
+
+    def test_torus_reports_genus_one(self):
+        # A handle is the sharpest test of connectivity: get the quads wrong and
+        # the Euler characteristic will not come out at 0.
+        field, spacing, origin = self._grid(
+            lambda x, y, z: 0.3**2 - (np.sqrt(x**2 + y**2) - 0.8) ** 2 - z**2, n=64, span=1.5
+        )
+        mesh = surface_nets(field, spacing=spacing, origin=origin)
+        assert mesh.is_watertight()
+        assert mesh.euler_characteristic() == 0
+
+    def test_two_separate_blobs_stay_manifold(self):
+        # Two spheres in one grid: the surface passes through some cells twice,
+        # which is precisely the case a single vertex per cell cannot represent.
+        def two(x, y, z):
+            left = 0.3**2 - ((x + 0.4) ** 2 + y**2 + z**2)
+            right = 0.3**2 - ((x - 0.4) ** 2 + y**2 + z**2)
+            return np.maximum(left, right)
+
+        field, spacing, origin = self._grid(two, n=56, span=1.0)
+        mesh = surface_nets(field, spacing=spacing, origin=origin)
+        assert mesh.is_watertight()
+        assert mesh.euler_characteristic() == 4  # two closed genus-0 surfaces
+
+    def test_empty_field_gives_an_empty_mesh(self):
+        assert surface_nets(np.full((8, 8, 8), -1.0, dtype=np.float32)).is_empty
+
+    def test_rejects_a_field_that_is_not_3d(self):
+        with pytest.raises(ValueError, match="3D grid"):
+            surface_nets(np.zeros((4, 4)))
+
+
+class TestVolumeMesher:
+    @staticmethod
+    def _solid(mask, **kwargs):
+        return build_volume_solid(_inflated_depth(mask), mask, **kwargs).mesh
+
+    @pytest.mark.parametrize("resolution", [40, 56, 72])
+    def test_closed_and_genus_zero_at_every_resolution(self, resolution):
+        mesh = self._solid(_disc_mask(96, radius=0.7), resolution=resolution)
+        assert mesh.is_watertight()
+        assert mesh.euler_characteristic() == 2
+
+    def test_a_disc_still_inflates_to_a_sphere(self):
+        mesh = self._solid(_disc_mask(96, radius=0.7), resolution=64)
+        extent = mesh.extent()
+        assert extent[2] / max(extent[0], extent[1]) == pytest.approx(1.0, abs=0.12)
+
+    def test_no_seam_vertices_are_duplicated(self):
+        # The whole point of the volume mesher: one continuous surface, so no
+        # two vertices share a position the way a stitched join produces.
+        mesh = self._solid(_disc_mask(80, radius=0.7), resolution=48)
+        quantised = np.round(mesh.vertices / 1e-5).astype(np.int64)
+        unique = np.unique(quantised, axis=0)
+        assert len(unique) == mesh.n_vertices
+
+    def test_thin_subject_stays_thin(self):
+        mask = np.zeros((96, 96), dtype=np.float32)
+        mask[10:86, 38:58] = 1.0
+        width, length, depth = self._solid(mask, resolution=64).extent()
+        assert depth < 0.4 * length
+
+    def test_empty_mask_raises(self):
+        with pytest.raises(ReconstructionError, match="mask is empty"):
+            build_volume_solid(
+                np.zeros((32, 32), dtype=np.float32), np.zeros((32, 32), dtype=np.float32)
+            )
+
+    def test_unknown_relief_mode_raises(self):
+        mask = _disc_mask(48)
+        with pytest.raises(ValueError, match="relief_mode"):
+            build_volume_solid(_inflated_depth(mask), mask, relief_mode="magic")
+
+    def test_resolution_scales_with_the_budget(self):
+        assert choose_resolution(1_000) < choose_resolution(50_000)
+        assert 40 <= choose_resolution(10_000) <= 192

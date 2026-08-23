@@ -133,6 +133,18 @@ def _add_reconstruction_options(parser: argparse.ArgumentParser) -> None:
         help="Relief multiplier. 1.0 is the geometrically correct inflation.",
     )
     shape.add_argument(
+        "--mesher",
+        default=None,
+        choices=["volume", "sheets"],
+        help="volume extracts one seamless surface (default); sheets is faster.",
+    )
+    shape.add_argument(
+        "--volume-resolution",
+        type=int,
+        default=None,
+        help="Grid cells across the subject for the volume mesher. 0 derives one.",
+    )
+    shape.add_argument(
         "--relief-mode",
         default=None,
         choices=["inradius", "fraction"],

@@ -130,7 +130,7 @@ class ReconstructionResult:
             + (f", limit {profile.triangle_hard_limit:,}" if profile.triangle_hard_limit else "")
             + ")",
             f"Vertices      : {stats['vertices']:,}",
-            f"Watertight    : {stats['watertight']}",
+            f"Closed solid  : {stats['closed']}",
             f"Size          : {extent[0]:.2f} x {extent[1]:.2f} x {extent[2]:.2f} {unit}s",
             "Texture       : "
             + (

@@ -191,8 +191,12 @@ class TestReconstruction:
             texture_size=128,
         )
 
-    def test_produces_a_watertight_mesh(self, roblox_result):
-        assert roblox_result.mesh.is_watertight()
+    def test_produces_a_closed_solid(self, roblox_result):
+        # Closure is checked after merging coincident vertices: the UV seam
+        # splits vertices so the front and back tiles can have their own
+        # texture coordinates, which breaks index-level watertightness while
+        # leaving the solid geometrically closed.
+        assert roblox_result.mesh.is_closed_surface()
 
     def test_respects_the_face_budget(self, roblox_result):
         assert roblox_result.mesh.n_faces <= 600

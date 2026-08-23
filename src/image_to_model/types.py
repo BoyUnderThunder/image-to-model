@@ -276,6 +276,22 @@ class Mesh:
         _, counts = np.unique(undirected, axis=0, return_counts=True)
         return bool(np.all(counts == 2))
 
+    def is_closed_surface(self, tolerance: float = 1e-5) -> bool:
+        """True when the surface is closed once coincident vertices are merged.
+
+        :meth:`is_watertight` works on indices, so it reports False for a mesh
+        carrying UV seams: splitting a vertex so each side can have its own
+        texture coordinate breaks the index-level join even though the two
+        copies sit in exactly the same place and the solid is still closed.
+        Every textured asset has such seams, so this is the check that matches
+        what "is it a solid" actually means.
+        """
+        if self.is_empty:
+            return False
+        from .geometry.mesh_ops import weld_vertices
+
+        return weld_vertices(self, tolerance).is_watertight()
+
     def euler_characteristic(self) -> int:
         """V - E + F. A closed genus-0 surface gives 2."""
         if self.is_empty:
@@ -330,6 +346,7 @@ class Mesh:
             "vertices": self.n_vertices,
             "faces": self.n_faces,
             "watertight": self.is_watertight(),
+            "closed": self.is_closed_surface(),
             "euler_characteristic": self.euler_characteristic(),
             "surface_area": round(self.surface_area(), 6),
             "volume": round(self.volume(), 6),

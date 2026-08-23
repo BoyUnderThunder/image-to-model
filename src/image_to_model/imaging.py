@@ -118,10 +118,35 @@ def resize_longest(array: np.ndarray, max_size: int) -> np.ndarray:
     return resize_array(array, new_size)
 
 
-def resize_array(array: np.ndarray, size: tuple[int, int], nearest: bool = False) -> np.ndarray:
-    """Resize an array to ``(width, height)`` using Pillow."""
+#: Resampling filters. Lanczos is sharpest for images, but it overshoots near
+#: edges; that ringing is harmless in a photo and destructive in a scalar field,
+#: where a sub-percent overshoot near a zero crossing flips the sign.
+_RESAMPLE_FILTERS = {
+    "lanczos": Image.Resampling.LANCZOS,
+    "bilinear": Image.Resampling.BILINEAR,
+    "area": Image.Resampling.BOX,
+    "nearest": Image.Resampling.NEAREST,
+}
+
+
+def resize_array(
+    array: np.ndarray,
+    size: tuple[int, int],
+    nearest: bool = False,
+    mode: str = "lanczos",
+) -> np.ndarray:
+    """Resize an array to ``(width, height)`` using Pillow.
+
+    ``mode`` picks the filter; use ``area`` when downsampling a field whose
+    values are about to be compared against a threshold, since it cannot
+    overshoot the input range.
+    """
     arr = np.asarray(array)
-    resample = Image.Resampling.NEAREST if nearest else Image.Resampling.LANCZOS
+    if nearest:
+        mode = "nearest"
+    if mode not in _RESAMPLE_FILTERS:
+        raise ValueError(f"Unknown resize mode {mode!r}")
+    resample = _RESAMPLE_FILTERS[mode]
     if arr.dtype == np.uint8:
         return np.array(Image.fromarray(arr).resize(size, resample), dtype=np.uint8)
 
