@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "image-to-model"
+version = "0.1.0"
+description = "Turn a single photograph into a textured, watertight 3D model."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["3d", "reconstruction", "monocular-depth", "mesh", "photogrammetry", "glb"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+# The core pipeline runs on numpy + pillow alone. Every heavier capability
+# (learned depth, learned matting, feed-forward 3D backends) is an extra that
+# the code detects at runtime and degrades gracefully without.
+dependencies = [
+    "numpy>=1.22",
+    "pillow>=9.0",
+]
+
+[project.optional-dependencies]
+# Learned monocular depth (Depth Anything V2 / DPT / MiDaS via transformers).
+ai = [
+    "torch>=2.0",
+    "transformers>=4.39",
+]
+# Learned foreground matting.
+matting = [
+    "rembg>=2.0",
+    "onnxruntime>=1.16",
+]
+# Faster smoothing/decimation and morphology.
+fast = [
+    "scipy>=1.9",
+]
+# Feed-forward single-image-to-3D backends. Needs a CUDA GPU in practice.
+gpu = [
+    "torch>=2.0",
+    "transformers>=4.39",
+    "trimesh>=4.0",
+    "huggingface-hub>=0.23",
+]
+serve = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "python-multipart>=0.0.9",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+all = [
+    "image-to-model[ai,matting,fast,serve]",
+]
+
+[project.scripts]
+image-to-model = "image_to_model.cli:main"
+img2model = "image_to_model.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/BoyUnderThunder/image-to-model"
+Source = "https://github.com/BoyUnderThunder/image-to-model"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+image_to_model = ["viewer/*.html", "viewer/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

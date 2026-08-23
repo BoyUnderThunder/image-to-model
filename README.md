@@ -1,0 +1,214 @@
+# image-to-model
+
+Turn a single photograph into a textured, watertight 3D model — built for getting
+props into **Roblox Studio**.
+
+```bash
+pip install -e .
+image-to-model photo.jpg -o out/
+```
+
+That writes an OBJ, a GLB, a baked 1024×1024 PNG texture, an import guide and a
+Luau spawn snippet — with the mesh already under Roblox's triangle limit, in
+studs, Y-up, and UV-mapped.
+
+```
+Target        : Roblox (Roblox Studio MeshPart, imported through the 3D Importer.)
+Backend       : depth
+Triangles     : 10,000  (budget 10,000, limit 21,000)
+Watertight    : True
+Size          : 2.54 x 4.00 x 2.23 studs
+Texture       : 1024x1024
+Target checks : all passed
+```
+
+---
+
+## Why the Roblox bits matter
+
+Roblox rejects or mangles meshes that ignore its constraints, so the pipeline
+treats them as hard requirements rather than suggestions:
+
+| Constraint | What the tool does |
+|---|---|
+| 21,000 triangles per single import (10,000 for batch imports and avatar meshes) | Decimates to a budget of 10,000 by default, and refuses to call a mesh valid above the hard limit |
+| Per-vertex colour is **dropped on import** | Always bakes a real UV atlas and PNG for Roblox targets — vertex colour alone would import grey |
+| Textures capped at 1024×1024 | Bakes at the cap and clamps any larger request |
+| Y-up, measured in studs | Exports Y-up and scales the model to 4 studs by default |
+| The 3D Importer reads OBJ, FBX and glTF | Writes OBJ (with MTL + PNG) and GLB |
+
+Every finished model is checked against the target profile, and the exit code is
+non-zero if anything would block the import.
+
+## Quickstart
+
+```bash
+pip install -e .                      # numpy + pillow only
+pip install -e '.[ai]'                # adds learned depth (torch + transformers)
+pip install -e '.[matting]'           # adds rembg for cluttered backgrounds
+```
+
+```bash
+image-to-model info                             # what's available in your install
+image-to-model demo --sample rocket -o out/     # no photo needed
+image-to-model photo.jpg -o out/ --preview --viewer
+
+image-to-model photo.jpg -o chair.glb --target game
+image-to-model logo.png  -o sign.obj  --preset relief
+image-to-model photo.jpg -o part.stl  --target print
+```
+
+`--viewer` writes a single self-contained HTML file that spins the model in a
+browser — worth a look before spending time in Studio.
+
+## How it works
+
+```
+photo ─► segment ─► depth ─► mesh ─► refine ─► texture ─► export
+```
+
+1. **Segment.** Isolate the subject: a real alpha channel if the image has one,
+   `rembg` if installed, otherwise a classical background model built from the
+   image border. That fallback compares each pixel against the background colour
+   of its own row and column, so a gradient backdrop doesn't fool it.
+2. **Depth.** Predict relative depth with Depth Anything V2 (or any transformers
+   depth model). Without `torch` installed it falls back to *silhouette
+   inflation*: push each pixel out in proportion to its distance from the
+   outline, which turns a flat shape into a rounded solid. For logos, sprites and
+   decals that's often the better choice anyway.
+3. **Mesh.** Lift the depth map into camera space through a pinhole model, build
+   a front surface, mirror it into a back surface, and stitch the two boundary
+   loops into a closed solid.
+4. **Refine.** Taubin-smooth (which removes stair-stepping without the steady
+   shrinking a plain Laplacian causes), drop noise islands, then simplify with
+   quadric error metric edge collapse down to the polygon budget.
+5. **Texture.** Bake a two-tile atlas — the subject on top, a darkened copy
+   underneath for the back — and assign UVs by projecting each vertex back
+   through the camera that made it.
+6. **Export.** OBJ + MTL + PNG, GLB, PLY or STL, converting axes and units for
+   the target.
+
+### Two details worth knowing
+
+**Geometry is low-poly, detail lives in the texture.** The mesh is built a few
+times over the budget and then decimated, rather than built at the budget. QEM
+spends triangles on creases and silhouettes and thins out flat areas, so a
+10,000-triangle prop with a 1024² texture reads far better than a uniformly
+coarse mesh — which is exactly how Roblox assets are normally authored.
+
+**The silhouette keeps a minimum thickness.** Tapering the front and back
+surfaces to meet at a knife edge puts vertices in the same place, and merging
+those makes any boundary edge with both ends on the rim four-way non-manifold.
+A sliver of thickness avoids that whole class of defect and gives an edge that
+physics and 3D printing can handle.
+
+## What this can and cannot do
+
+A single photograph contains no information about the back of an object. This
+produces a **rounded relief closed into a solid** — the front is reconstructed
+from predicted depth, the back is a mirrored, darkened estimate. That is the
+honest ceiling for single-view reconstruction, and it is a good fit for props,
+signage, decals and background scenery.
+
+It is *not* a full 360° reconstruction. Expect:
+
+- a visible seam ridge where the front and back surfaces meet;
+- an invented back surface, not a measured one;
+- poor results on subjects with deep concavities, or on cluttered backgrounds
+  without `rembg` installed;
+- flat art (logos, sprites) to work well, since there is little true depth to
+  miss.
+
+For genuine 360° geometry you want a feed-forward image-to-3D model — see
+[Custom backends](#custom-backends).
+
+## Python API
+
+```python
+from image_to_model import reconstruct
+
+result = reconstruct("photo.jpg", target="roblox")
+print(result.summary())
+print(result.validation.ok, result.mesh.n_faces)
+
+result.save("out/")                        # target's preferred formats
+result.save("out/thing.glb")               # one specific file
+result.save_debug("out/debug")             # mask, depth map, texture
+```
+
+`result.mesh` is a plain NumPy `Mesh` with `vertices`, `faces`, `uvs`,
+`vertex_colors` and `vertex_normals`, plus geometry helpers:
+
+```python
+mesh.is_watertight()          # every edge shared by exactly two faces
+mesh.euler_characteristic()   # 2 for a closed genus-0 surface
+mesh.volume()                 # signed, so the sign reveals inverted winding
+mesh.stats()
+```
+
+## Targets
+
+| Target | Budget | Hard limit | Texture | Units | Up |
+|---|---|---|---|---|---|
+| `roblox` | 10,000 | 21,000 | 1024 | studs | Y |
+| `roblox-avatar` | 4,000 | 10,000 | 1024 | studs | Y |
+| `game` | 50,000 | — | 2048 | metres | Y |
+| `print` | 300,000 | — | 4096 | millimetres | Z |
+| `generic` | 200,000 | — | 4096 | metres | Y |
+
+Presets: `fast`, `balanced`, `detailed`, `relief`, `roblox-prop`,
+`roblox-accessory`.
+
+## Useful options
+
+```
+--target-faces N        triangle budget (0 = target default, negative = no decimation)
+--size-units N          longest axis, in the target's units
+--relief-scale N        front depth as a fraction of subject width (default 0.35)
+--thickness N           back depth relative to the front; 0 gives a flat back
+--open-back             leave the model open instead of closing it
+--working-resolution N  image size used for depth and texture (default 512)
+--depth-model NAME      auto | heuristic | depth-anything | dpt | any HF model id
+--segmentation NAME     auto | alpha | rembg | border | none
+--preview / --viewer    turntable PNG / self-contained WebGL page
+--debug-dir DIR         dump the mask, depth map and baked texture
+```
+
+## Custom backends
+
+The reconstruction step is pluggable. Register a backend to swap in a
+feed-forward image-to-3D model (TripoSR, Stable Fast 3D, Hunyuan3D) and keep the
+segmentation, budgeting, texture baking, export and Roblox validation around it:
+
+```python
+from image_to_model.backends import ReconstructionBackend, BackendOutput, register_backend
+
+class TripoSRBackend(ReconstructionBackend):
+    name = "triposr"
+
+    def reconstruct(self, subject, config):
+        mesh = my_model(subject.image, subject.mask)   # -> image_to_model.types.Mesh
+        return BackendOutput(mesh=mesh)
+
+register_backend(TripoSRBackend)
+```
+
+Return the mesh Y-up with +Z towards the camera and unscaled; the pipeline
+handles units, axes and validation. Then use it with `--backend triposr`.
+
+## Development
+
+```bash
+pip install -e '.[dev]'
+pytest -q
+ruff check src tests
+```
+
+The test suite covers mesh invariants, all four exporters (the GLB is parsed
+back and its accessors walked, since an invalid glTF still looks like a
+plausible file), segmentation accuracy against known-area shapes, decimation
+topology preservation, and the CLI end to end.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

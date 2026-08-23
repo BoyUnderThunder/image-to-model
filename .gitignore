@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+
+# Testing / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Model weights and caches
+weights/
+checkpoints/
+.cache/
+*.onnx
+*.pth
+*.safetensors
+
+# Pipeline output
+out/
+outputs/
+*.glb
+*.obj
+*.mtl
+*.ply
+*.stl
+!examples/**/*.glb
+
+# OS
+.DS_Store
+Thumbs.db
