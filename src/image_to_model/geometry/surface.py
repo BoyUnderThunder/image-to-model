@@ -58,6 +58,9 @@ class SurfaceResult:
     image_size: tuple[int, int]
     """``(width, height)`` of the depth map."""
 
+    orthographic: bool = True
+    """Which projection built the points; texturing must invert the same one."""
+
 
 def choose_stride(
     mask: np.ndarray, target_faces: int, oversample: float = 6.0, max_stride: int = 24
@@ -209,19 +212,34 @@ def _grid_triangles(index_map: np.ndarray, inside: np.ndarray) -> np.ndarray:
 def build_surface(
     depth: np.ndarray,
     mask: np.ndarray,
-    relief_scale: float = 0.35,
-    thickness: float = 0.55,
+    relief_scale: float = 1.0,
+    relief_mode: str = "inradius",
+    thickness: float = 1.0,
     close_back: bool = True,
     fov_degrees: float = 55.0,
     mask_threshold: float = 0.5,
     stride: int = 1,
     rim_width: float = 0.0,
-    min_thickness: float = 0.012,
+    min_thickness: float = 0.004,
     rim_profile: str = "fillet",
+    orthographic: bool = True,
 ) -> SurfaceResult:
     """Build a surface mesh from a normalised depth map and subject mask.
 
     ``depth`` must be in [0, 1] with larger meaning further from the camera.
+
+    ``relief_mode`` decides how deep the model gets:
+
+    ``inradius``
+        Scale the relief so the deepest point sits one silhouette-inradius
+        above the plane. Inflating a disc of radius R this way gives a
+        hemisphere of height R, so front and back together span 2R -- the
+        disc's own diameter, i.e. a sphere. It follows the subject's shape:
+        a round outline inflates to something round, a thin one stays thin.
+    ``fraction``
+        The relief is ``relief_scale`` times the subject's longest side. Fixed
+        regardless of shape, so round subjects come out flattened and thin ones
+        bloated. Kept for when you want to force a specific depth.
 
     ``min_thickness`` is the smallest separation between the front and back
     sheets, as a fraction of the subject's width. It keeps the silhouette from
@@ -269,28 +287,43 @@ def build_surface(
 
     full_binary = mask > mask_threshold
     subject_pixels = max(1, int(full_binary.sum()))
+
+    # Distance is set so the subject spans one world unit across its larger side.
+    subject_extent = max(
+        int(np.any(full_binary, axis=1).sum()), int(np.any(full_binary, axis=0).sum()), 1
+    )
+    distance = camera_distance(intrinsics, subject_extent, _WORLD_WIDTH)
     from ..depth.heuristic import distance_transform
 
-    distance_grid = distance_transform(full_binary)[np.ix_(rows, cols)]
+    distance_full = distance_transform(full_binary)
+    distance_grid = distance_full[np.ix_(rows, cols)]
 
     if rim_width <= 0:
         # Scale the taper with the subject so it stays proportionally narrow.
         rim_width = max(1.0, _RIM_WIDTH_FRACTION * math.sqrt(subject_pixels))
+
+    if relief_mode == "inradius":
+        # The largest distance-to-silhouette is the radius of the biggest disc
+        # that fits inside the outline, which is the height a correct inflation
+        # reaches at that point.
+        inradius = float(distance_full.max()) / subject_extent * _WORLD_WIDTH
+        relief_depth = float(relief_scale) * inradius
+    elif relief_mode == "fraction":
+        relief_depth = float(relief_scale) * _WORLD_WIDTH
+    else:
+        raise ValueError(
+            f"relief_mode must be 'inradius' or 'fraction', got {relief_mode!r}"
+        )
     rim = _rim_factor(distance_grid, rim_width, rim_profile)
     rim = np.where(inside, rim, 0.0).astype(np.float32)
 
     rows_grid, cols_grid = np.meshgrid(rows, cols, indexing="ij")
-    relief_depth = float(relief_scale) * _WORLD_WIDTH
-
-    # Distance is set so the subject spans one world unit across its larger side.
-    subject_rows = np.any(mask > mask_threshold, axis=1)
-    subject_cols = np.any(mask > mask_threshold, axis=0)
-    subject_extent = max(int(subject_rows.sum()), int(subject_cols.sum()), 1)
-    distance = camera_distance(intrinsics, subject_extent, _WORLD_WIDTH)
 
     half_gap = 0.5 * float(min_thickness) * _WORLD_WIDTH
     front_relief = rim * relief_unit * relief_depth + half_gap
-    front_points = project_to_world(cols_grid, rows_grid, front_relief, intrinsics, distance)
+    front_points = project_to_world(
+        cols_grid, rows_grid, front_relief, intrinsics, distance, orthographic
+    )
 
     index_map = np.full(inside.shape, -1, dtype=np.int32)
     index_map[inside] = np.arange(int(inside.sum()), dtype=np.int32)
@@ -311,7 +344,9 @@ def build_surface(
         # The back mirrors the front inward. A thickness of 0 still leaves a
         # flat sheet at Z=0 rather than nothing, which is the bas-relief case.
         back_relief = -(rim * relief_unit * relief_depth * float(thickness)) - half_gap
-        back_points = project_to_world(cols_grid, rows_grid, back_relief, intrinsics, distance)
+        back_points = project_to_world(
+            cols_grid, rows_grid, back_relief, intrinsics, distance, orthographic
+        )
         offset = int(inside.sum())
 
         vertices.append(back_points[inside])
@@ -345,4 +380,5 @@ def build_surface(
         intrinsics=intrinsics,
         distance=distance,
         image_size=(width, height),
+        orthographic=orthographic,
     )

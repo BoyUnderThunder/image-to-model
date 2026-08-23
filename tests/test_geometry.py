@@ -30,6 +30,19 @@ def _disc_mask(size: int = 64, radius: float = 0.7) -> np.ndarray:
     return (grid <= radius**2).astype(np.float32)
 
 
+def _inflated_depth(mask: np.ndarray) -> np.ndarray:
+    """Depth from the heuristic estimator, which is what shapes the relief.
+
+    A flat depth map carries no shape at all, so the relief scaling has nothing
+    to act on; these tests need the real inflation profile.
+    """
+    from image_to_model.depth.heuristic import HeuristicDepthEstimator
+
+    size = mask.shape[0]
+    rgb = np.zeros((size, mask.shape[1], 3), dtype=np.uint8)
+    return HeuristicDepthEstimator(shading_weight=0.0).estimate(rgb, mask).normalized().depth
+
+
 def _dome_depth(mask: np.ndarray) -> np.ndarray:
     """A smooth dome, normalised so larger means further away."""
     size = mask.shape[0]
@@ -328,3 +341,137 @@ class TestRimProfile:
         for name, fn in RIM_PROFILES.items():
             values = np.asarray(fn(t))
             assert values.min() >= 0.0 and values.max() <= 1.0, name
+
+
+class TestShapeFidelity:
+    """The proportions of the result, which is what "misshapen" actually means.
+
+    Depth used to be a fixed fraction of the bounding box for every subject, so
+    round things came out flattened and thin things bloated. These lock in that
+    the model now follows the subject's own silhouette.
+    """
+
+    @staticmethod
+    def _reconstruct(mask, depth, **kwargs):
+        from image_to_model.geometry.decimate import decimate
+
+        result = build_surface(depth, mask, stride=1, **kwargs)
+        mesh = remove_duplicate_faces(remove_degenerate_faces(result.mesh))
+        mesh, _ = compact_vertices(mesh)
+        return decimate(taubin_smooth(mesh, iterations=8), 4000).mesh
+
+    def test_a_disc_inflates_to_a_sphere(self):
+        # The headline case: a circular outline must come back as deep as it is
+        # wide. It previously came back at ~55% depth, a squashed lens.
+        mask = _disc_mask(96, radius=0.7)
+        mesh = self._reconstruct(mask, _inflated_depth(mask))
+        extent = mesh.extent()
+        assert extent[2] / max(extent[0], extent[1]) == pytest.approx(1.0, abs=0.12)
+
+    def test_a_narrow_bar_gets_a_square_cross_section(self):
+        # A long narrow bar should reconstruct as a rounded bar: shallow
+        # relative to its length, and about as deep as it is wide, which is
+        # what inflating its small inradius gives. Under the old fixed-fraction
+        # relief it came out as deep as a ball would.
+        mask = np.zeros((96, 96), dtype=np.float32)
+        mask[10:86, 40:56] = 1.0  # tall and narrow
+        width, length, depth = self._reconstruct(mask, _inflated_depth(mask)).extent()
+
+        assert depth < 0.35 * length
+        assert depth == pytest.approx(width, rel=0.3)
+
+    def test_depth_tracks_the_inradius_not_the_bounding_box(self):
+        # Two subjects with the same bounding box but different inradius must
+        # get different depths.
+        square = np.zeros((96, 96), dtype=np.float32)
+        square[16:80, 16:80] = 1.0
+
+        cross = np.zeros((96, 96), dtype=np.float32)
+        cross[16:80, 42:54] = 1.0
+        cross[42:54, 16:80] = 1.0  # same bbox, much smaller inradius
+
+        square_depth = self._reconstruct(square, _inflated_depth(square)).extent()[2]
+        cross_depth = self._reconstruct(cross, _inflated_depth(cross)).extent()[2]
+        assert cross_depth < 0.5 * square_depth
+
+    def test_fraction_mode_ignores_shape(self):
+        # The legacy behaviour, kept deliberately: same depth regardless of outline.
+        disc = _disc_mask(96, radius=0.7)
+        bar = np.zeros((96, 96), dtype=np.float32)
+        bar[10:86, 40:56] = 1.0
+        kwargs = dict(relief_mode="fraction", relief_scale=0.3)
+        disc_depth = self._reconstruct(disc, _inflated_depth(disc), **kwargs).extent()[2]
+        bar_depth = self._reconstruct(bar, _inflated_depth(bar), **kwargs).extent()[2]
+        assert disc_depth == pytest.approx(bar_depth, rel=0.15)
+
+    def test_unknown_relief_mode_raises(self):
+        mask = _disc_mask(48)
+        with pytest.raises(ValueError, match="relief_mode"):
+            build_surface(np.zeros_like(mask), mask, stride=1, relief_mode="magic")
+
+    def test_orthographic_does_not_narrow_with_height(self):
+        # Perspective shrinks lateral offset as the surface bulges forward,
+        # which is what turned reconstructed spheres into teardrops. The
+        # difference shows in the cross-section near the front: the widest
+        # point is the equator, and that sits at z ~ 0 under either projection.
+        mask = _disc_mask(96, radius=0.7)
+        depth = _inflated_depth(mask)
+
+        def front_width(mesh):
+            z = mesh.vertices[:, 2]
+            front = mesh.vertices[z > 0.6 * z.max()]
+            return float(front[:, 0].max() - front[:, 0].min())
+
+        ortho = build_surface(depth, mask, stride=1, orthographic=True).mesh
+        persp = build_surface(depth, mask, stride=1, orthographic=False).mesh
+        assert front_width(ortho) > front_width(persp) * 1.02
+
+    def test_projection_round_trips_for_texturing(self):
+        # UVs are derived by inverting the projection, so it must invert exactly.
+        from image_to_model.geometry.lift import project_to_world, world_to_pixel
+
+        intrinsics = CameraIntrinsics.from_fov(128, 128, 55.0)
+        cols = np.array([10.0, 64.0, 120.0], dtype=np.float32)
+        rows = np.array([20.0, 64.0, 100.0], dtype=np.float32)
+        relief = np.array([0.0, 0.4, -0.3], dtype=np.float32)
+        for orthographic in (True, False):
+            points = project_to_world(cols, rows, relief, intrinsics, 3.0, orthographic)
+            back = world_to_pixel(points, intrinsics, 3.0, orthographic)
+            assert np.allclose(back[:, 0], cols, atol=1e-3)
+            assert np.allclose(back[:, 1], rows, atol=1e-3)
+
+
+class TestSphericalInflation:
+    def test_matches_a_hemisphere(self):
+        from image_to_model.depth.heuristic import HeuristicDepthEstimator
+
+        size = 128
+        mask = _disc_mask(size, radius=0.8)
+        rgb = np.zeros((size, size, 3), dtype=np.uint8)
+        estimator = HeuristicDepthEstimator(shading_weight=0.0)
+        height = 1.0 - estimator.estimate(rgb, mask).normalized().depth
+
+        # Sample along a radius and compare with sqrt(1 - (r/R)^2).
+        centre = size // 2
+        radius = 0.8 * size / 2
+        offsets = np.arange(0, int(radius * 0.9))
+        measured = height[centre, centre + offsets]
+        expected = np.sqrt(np.clip(1.0 - (offsets / radius) ** 2, 0.0, 1.0))
+        assert np.abs(measured - expected).max() < 0.12
+
+    def test_power_profile_is_still_available(self):
+        from image_to_model.depth.heuristic import HeuristicDepthEstimator
+
+        mask = _disc_mask(64)
+        rgb = np.zeros((64, 64, 3), dtype=np.uint8)
+        result = HeuristicDepthEstimator(profile="power").estimate(rgb, mask)
+        assert result.metadata["profile"] == "power"
+
+    def test_unknown_profile_raises(self):
+        from image_to_model.depth.heuristic import HeuristicDepthEstimator
+
+        mask = _disc_mask(32)
+        with pytest.raises(ValueError, match="profile"):
+            HeuristicDepthEstimator(profile="blobby").estimate(
+                np.zeros((32, 32, 3), dtype=np.uint8), mask
+            )

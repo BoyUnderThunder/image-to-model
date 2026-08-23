@@ -35,12 +35,21 @@ def project_to_world(
     relief: np.ndarray,
     intrinsics: CameraIntrinsics,
     distance: float,
+    orthographic: bool = True,
 ) -> np.ndarray:
     """Turn pixel coordinates plus a relief height into world points.
 
     ``relief`` is displacement towards the camera, in world units, measured
     from the plane sitting ``distance`` away. The returned points are centred
     on that plane, so a flat relief lands on Z = 0.
+
+    Orthographic projection is the default, and for this pipeline it is the
+    more correct choice. Perspective divergence shrinks a point's lateral
+    offset as it comes towards the camera, so a surface bulging forward also
+    narrows -- turning a reconstructed sphere into a teardrop. That narrowing
+    is only right if the relief is true metric depth. Monocular depth is
+    relative and the relief height is a prior, so the silhouette is the widest
+    cross-section and lateral position should not move with height.
     """
     cols = np.asarray(cols, dtype=np.float32)
     rows = np.asarray(rows, dtype=np.float32)
@@ -50,9 +59,10 @@ def project_to_world(
     u = (cols - intrinsics.cx) / intrinsics.fx
     v = (rows - intrinsics.cy) / intrinsics.fy
 
-    # Points nearer the camera subtend a wider angle, so their lateral offset
-    # shrinks for the same pixel position.
-    ray_distance = distance - relief
+    # Under perspective, points nearer the camera subtend a wider angle, so
+    # their lateral offset shrinks for the same pixel position. Holding the
+    # ray distance constant is exactly what makes the projection orthographic.
+    ray_distance = distance if orthographic else distance - relief
 
     points = np.empty(relief.shape + (3,), dtype=np.float32)
     points[..., 0] = u * ray_distance
@@ -61,14 +71,22 @@ def project_to_world(
     return points
 
 
-def world_to_pixel(points: np.ndarray, intrinsics: CameraIntrinsics, distance: float) -> np.ndarray:
+def world_to_pixel(
+    points: np.ndarray,
+    intrinsics: CameraIntrinsics,
+    distance: float,
+    orthographic: bool = True,
+) -> np.ndarray:
     """Inverse of :func:`project_to_world`, giving ``(col, row)`` per point.
 
     Used to re-derive texture coordinates after decimation has moved vertices,
     which is exact and avoids interpolating UVs through edge collapses.
     """
     points = np.asarray(points, dtype=np.float32)
-    ray_distance = np.maximum(distance - points[..., 2], 1e-6)
+    if orthographic:
+        ray_distance = np.full(points.shape[:-1], float(distance), dtype=np.float32)
+    else:
+        ray_distance = np.maximum(distance - points[..., 2], 1e-6)
 
     cols = points[..., 0] / ray_distance * intrinsics.fx + intrinsics.cx
     rows = -points[..., 1] / ray_distance * intrinsics.fy + intrinsics.cy

@@ -146,11 +146,18 @@ def compute_uvs(
     intrinsics: CameraIntrinsics,
     distance: float,
     layout: AtlasLayout,
+    orthographic: bool = True,
 ) -> np.ndarray:
-    """UVs for arbitrary vertices, derived by re-projecting them into the image."""
+    """UVs for arbitrary vertices, derived by re-projecting them into the image.
+
+    ``orthographic`` must match the projection the surface was built with, or
+    the texture slides across the geometry.
+    """
     from .geometry.lift import world_to_pixel
 
-    pixel_coords = world_to_pixel(np.asarray(vertices, dtype=np.float32), intrinsics, distance)
+    pixel_coords = world_to_pixel(
+        np.asarray(vertices, dtype=np.float32), intrinsics, distance, orthographic
+    )
     return layout.uv(pixel_coords, is_back)
 
 

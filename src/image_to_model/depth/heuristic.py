@@ -7,8 +7,10 @@ depth to find anyway.
 
 The approach is the classic "inflation" idea from sketch-based modelling: push
 each pixel out by an amount that grows with its distance from the silhouette
-edge, which turns a flat shape into a rounded solid. Image shading is then
-mixed in at high frequency so surface detail survives.
+edge, which turns a flat shape into a rounded solid. The profile used is the
+one that makes a disc inflate into an exact hemisphere, so a circular outline
+reconstructs as a sphere. Image shading is then mixed in at high frequency so
+surface detail survives.
 """
 
 from __future__ import annotations
@@ -70,12 +72,16 @@ class HeuristicDepthEstimator(DepthEstimator):
 
     def __init__(
         self,
+        profile: str = "spherical",
         roundness: float = 0.5,
         shading_weight: float = 0.15,
         shading_sigma: float = 4.0,
     ) -> None:
-        #: Exponent on normalised distance. 0.5 gives a hemispherical bulge,
-        #: 1.0 a cone, and values above that an increasingly pointed profile.
+        #: ``spherical`` inflates a disc into a true hemisphere; ``power``
+        #: raises normalised distance to :attr:`roundness`, which is cheaper to
+        #: reason about but is not the shape of a dome.
+        self.profile = profile
+        #: Exponent used by the ``power`` profile only.
         self.roundness = float(roundness)
         self.shading_weight = float(np.clip(shading_weight, 0.0, 1.0))
         self.shading_sigma = float(shading_sigma)
@@ -95,8 +101,19 @@ class HeuristicDepthEstimator(DepthEstimator):
         peak = float(distance.max())
         if peak <= 1e-6:
             height_field = np.zeros_like(distance)
-        else:
+        elif self.profile == "spherical":
+            # For a disc of radius R the distance transform is d = R - r, so a
+            # hemisphere's height sqrt(R^2 - r^2) becomes R*sqrt(1 - (1 - d/R)^2).
+            # The obvious alternative, (d/R)^0.5, runs up to 17% low through the
+            # mid-radius and inflates discs into pointed bicones rather than domes.
+            normalized = np.clip(distance / peak, 0.0, 1.0)
+            height_field = np.sqrt(np.clip(1.0 - (1.0 - normalized) ** 2, 0.0, 1.0))
+        elif self.profile == "power":
             height_field = np.power(distance / peak, self.roundness, dtype=np.float32)
+        else:
+            raise ValueError(
+                f"profile must be 'spherical' or 'power', got {self.profile!r}"
+            )
 
         if self.shading_weight > 0:
             # Only the high-frequency part of the image is used: broad
@@ -119,6 +136,7 @@ class HeuristicDepthEstimator(DepthEstimator):
             mask=None if mask is None else np.asarray(mask, dtype=np.float32),
             source=self.name,
             metadata={
+                "profile": self.profile,
                 "roundness": self.roundness,
                 "shading_weight": self.shading_weight,
                 "relative": True,

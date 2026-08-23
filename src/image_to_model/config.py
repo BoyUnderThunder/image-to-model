@@ -53,13 +53,33 @@ class ReconstructionConfig:
     fov_degrees: float = 55.0
     """Assumed horizontal field of view used to lift pixels into camera space."""
 
-    relief_scale: float = 0.35
-    """Depth range of the front surface as a fraction of the subject's width.
-    Higher values make the object bulge further towards the camera."""
+    relief_mode: str = "inradius"
+    """How deep the model gets. ``inradius`` scales the relief to the subject's
+    own silhouette, so a round outline inflates to something round and a thin
+    one stays thin; ``fraction`` uses a fixed share of the subject's width
+    regardless of shape, which flattens round subjects and bloats thin ones."""
 
-    thickness: float = 0.55
+    relief_scale: float = 1.0
+    """Multiplier on the relief. In ``inradius`` mode 1.0 is the geometrically
+    correct inflation (a circle becomes a sphere); raise it to exaggerate depth,
+    lower it to flatten. In ``fraction`` mode it *is* the fraction of the
+    subject's width."""
+
+    thickness: float = 1.0
     """Back-surface depth as a fraction of the front relief. 0 leaves the model
-    open (a 2.5D relief); values near 1 produce a roughly symmetric solid."""
+    flat-backed; 1.0 produces a symmetric solid, which is what makes an
+    inflated circle close into a sphere rather than a lens."""
+
+    min_thickness: float = 0.004
+    """Thinnest the silhouette edge may get, as a fraction of subject width.
+    Front and back vertices must never coincide (that makes rim edges
+    non-manifold), but the wall between them shows as a seam, so this is the
+    smallest value that keeps the geometry sound."""
+
+    projection: str = "orthographic"
+    """``orthographic`` keeps lateral position fixed as the surface bulges
+    forward. ``perspective`` narrows it with height, which is only correct for
+    true metric depth and otherwise turns spheres into teardrops."""
 
     close_back: bool = True
     """Generate and stitch a back surface to make the mesh watertight."""
@@ -141,6 +161,12 @@ class ReconstructionConfig:
             raise ValueError("fov_degrees must be within [1, 179]")
         if self.relief_scale <= 0.0:
             raise ValueError("relief_scale must be positive")
+        if not 0.0 < self.min_thickness < 1.0:
+            raise ValueError("min_thickness must be within (0, 1)")
+        if self.relief_mode not in {"inradius", "fraction"}:
+            raise ValueError("relief_mode must be 'inradius' or 'fraction'")
+        if self.projection not in {"orthographic", "perspective"}:
+            raise ValueError("projection must be 'orthographic' or 'perspective'")
         if self.thickness < 0.0:
             raise ValueError("thickness must be non-negative")
         if self.depth_smoothing < 0.0:
@@ -239,6 +265,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         # A flat-backed bas-relief, useful for signage and wall props.
         "close_back": True,
         "thickness": 0.05,
+        "relief_mode": "fraction",
         "relief_scale": 0.25,
     },
     "roblox-prop": {

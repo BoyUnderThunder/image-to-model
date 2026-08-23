@@ -93,12 +93,15 @@ class DepthBackend(ReconstructionBackend):
                 depth,
                 work_mask,
                 relief_scale=config.relief_scale,
+                relief_mode=config.relief_mode,
                 thickness=config.thickness,
                 close_back=config.close_back,
                 fov_degrees=config.fov_degrees,
                 mask_threshold=0.5,
                 stride=stride,
                 rim_profile=config.rim_profile,
+                min_thickness=config.min_thickness,
+                orthographic=config.projection == "orthographic",
             )
 
         mesh = surface.mesh
@@ -129,7 +132,9 @@ class DepthBackend(ReconstructionBackend):
         texture = None
 
         # Still in camera space here, so back-projection is exact.
-        pixel_coords = world_to_pixel(mesh.vertices, surface.intrinsics, surface.distance)
+        pixel_coords = world_to_pixel(
+            mesh.vertices, surface.intrinsics, surface.distance, surface.orthographic
+        )
 
         if config.should_bake_texture():
             with stage("Baking texture", log):
@@ -140,7 +145,12 @@ class DepthBackend(ReconstructionBackend):
                     backface_darkening=config.backface_darkening,
                 )
                 mesh.uvs = compute_uvs(
-                    mesh.vertices, is_back, surface.intrinsics, surface.distance, layout
+                    mesh.vertices,
+                    is_back,
+                    surface.intrinsics,
+                    surface.distance,
+                    layout,
+                    orthographic=surface.orthographic,
                 )
 
         if config.texture:

@@ -130,13 +130,32 @@ def _add_reconstruction_options(parser: argparse.ArgumentParser) -> None:
         "--relief-scale",
         type=float,
         default=None,
-        help="Depth of the front surface as a fraction of subject width (default 0.35).",
+        help="Relief multiplier. 1.0 is the geometrically correct inflation.",
+    )
+    shape.add_argument(
+        "--relief-mode",
+        default=None,
+        choices=["inradius", "fraction"],
+        help="inradius scales depth to the subject's own outline (default); "
+        "fraction uses a fixed share of its width.",
+    )
+    shape.add_argument(
+        "--projection",
+        default=None,
+        choices=["orthographic", "perspective"],
+        help="orthographic keeps width fixed as the surface bulges (default).",
     )
     shape.add_argument(
         "--thickness",
         type=float,
         default=None,
-        help="Back depth relative to the front. 0 gives a flat back (default 0.55).",
+        help="Back depth relative to the front. 0 gives a flat back (default 1.0).",
+    )
+    shape.add_argument(
+        "--min-thickness",
+        type=float,
+        default=None,
+        help="Thinnest silhouette edge, as a fraction of subject width.",
     )
     shape.add_argument(
         "--open-back",

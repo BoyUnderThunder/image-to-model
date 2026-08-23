@@ -76,9 +76,10 @@ photo ─► segment ─► depth ─► mesh ─► refine ─► texture ─�
    inflation*: push each pixel out in proportion to its distance from the
    outline, which turns a flat shape into a rounded solid. For logos, sprites and
    decals that's often the better choice anyway.
-3. **Mesh.** Lift the depth map into camera space through a pinhole model, build
-   a front surface, mirror it into a back surface, and stitch the two boundary
-   loops into a closed solid.
+3. **Mesh.** Lift the depth map into space, build a front surface, mirror it
+   into a back surface, and stitch the two boundary loops into a closed solid.
+   Depth is scaled to the subject's own silhouette, so a round outline comes
+   back round and a thin one stays thin.
 4. **Refine.** Taubin-smooth (which removes stair-stepping without the steady
    shrinking a plain Laplacian causes), drop noise islands, then simplify with
    quadric error metric edge collapse down to the polygon budget.
@@ -95,6 +96,29 @@ times over the budget and then decimated, rather than built at the budget. QEM
 spends triangles on creases and silhouettes and thins out flat areas, so a
 10,000-triangle prop with a 1024² texture reads far better than a uniformly
 coarse mesh — which is exactly how Roblox assets are normally authored.
+
+**Depth follows the silhouette, not the bounding box.** How deep the model gets
+is set by the subject's *inradius* — the radius of the largest disc that fits
+inside its outline. Inflating a disc of radius R by that much gives a hemisphere
+of height R, so front and back together span 2R: the disc's own diameter, i.e. a
+sphere. The obvious alternative, making depth a fixed fraction of the bounding
+box, gives every subject the same thickness regardless of shape — a ball comes
+out 45% too flat and a thin rocket 71% too fat. That single choice is the
+difference between a recognisable prop and a misshapen blob. `--relief-mode
+fraction` restores the old behaviour when you want a specific depth.
+
+**Inflation uses a true hemisphere profile.** For a disc the distance transform
+is `d = R - r`, so a hemisphere's height `sqrt(R² - r²)` becomes
+`R·sqrt(1 - (1 - d/R)²)`. The tempting shortcut `(d/R)^0.5` runs up to 17% low
+through the mid-radius and inflates discs into pointed bicones instead of domes.
+
+**Lifting is orthographic.** Perspective divergence shrinks a point's lateral
+offset as it comes towards the camera, so a surface bulging forward also narrows
+— turning a reconstructed sphere into a teardrop. That narrowing is only correct
+if the relief is true metric depth; monocular depth is relative and the relief is
+a prior, so the silhouette is the widest cross-section and lateral position
+should not move with height. `--projection perspective` is there for when a
+metric depth model makes it meaningful.
 
 **The silhouette is rounded, not cornered.** The relief tapers to the outline
 along a quarter-circle, so the surface arrives at the silhouette tangent to the
@@ -222,8 +246,11 @@ Presets: `fast`, `balanced`, `detailed`, `relief`, `roblox-prop`,
 ```
 --target-faces N        triangle budget (0 = target default, negative = no decimation)
 --size-units N          longest axis, in the target's units
---relief-scale N        front depth as a fraction of subject width (default 0.35)
+--relief-mode NAME      inradius (follows the outline, default) | fraction
+--relief-scale N        relief multiplier; 1.0 is the correct inflation
 --thickness N           back depth relative to the front; 0 gives a flat back
+--projection NAME       orthographic (default) | perspective
+--min-thickness N       thinnest silhouette edge, as a fraction of width
 --open-back             leave the model open instead of closing it
 --working-resolution N  image size used for depth and texture (default 512)
 --depth-model NAME      auto | heuristic | depth-anything | dpt | any HF model id
